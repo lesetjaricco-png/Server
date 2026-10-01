@@ -105,7 +105,7 @@ All responses are JSON. Routes marked **authenticated** require the configured `
 | `GET /ack` | Yes | Clears the pending signal. |
 
 The receiver posts state to `/receiver-state` about once per second and continues polling `/next`. The snapshot contains `receiverId`, `dayStartBalance`, `currentBalance`, `dailyClosedNet`, `lossesToday`, `spikesToday`, `secondsSinceLastLoss` (`-1` means no loss today), `scheduleOpen`, and `allPositionsAtBreakEven`. The server caches the latest snapshot and returns `changed_fields`/`changed_summary` on each post; the receiver logs only changed parameters, while unchanged posts still refresh the freshness timer. `/signal` is rejected unless a recent receiver snapshot passes the server-configured gates and the Lichess check passes. `/next` re-evaluates the latest receiver state before returning a queued signal; when state is stale or a gate is closed it returns an empty result and does not acknowledge the queued signal. Keep the receiver attached and publishing state before submitting signals.
-
+////////////////////////////////////////////////////////////////////////
 The `RECEIVER_*` limits are enforced only by the server. The receiver reports account, schedule, and position facts and sizes orders from its own risk and stop-distance inputs. `SpikeThresholdPct` on the receiver defines which closes increment `spikesToday`. Schedule windows are evaluated in MT5 and reported as `scheduleOpen`. The server timestamps snapshots when received and fails closed after `RECEIVER_STATE_MAX_AGE_MS`.
 
 `POST /signal` expects a JSON body with `side` (`BUY` or `SELL`), `symbol`, and positive `lots`. `ts` is optional and defaults to the current Unix timestamp in seconds.
