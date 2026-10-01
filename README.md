@@ -16,7 +16,7 @@ From the project root, build the executable jar:
 mvn clean package
 ```
 
-The jar is created at `target/server-java-1.0.0.jar`. Run it from the project root so the service can find an optional `.env` file:
+The shaded jar is created at `target/server-java-<version>.jar`. Run it from the project root so the service can find an optional `.env` file:
 
 ```powershell
 java -jar target/server-java-1.0.0.jar
@@ -33,6 +33,33 @@ java -jar target/server-java-1.0.0.jar
 ```
 
 The same variables can be set in Command Prompt with `set HOST=127.0.0.1` and `set PORT=5001`, or in a Unix-like shell with `export HOST=127.0.0.1` and `export PORT=5001`.
+
+## CI/CD
+
+GitHub Actions runs the Java tests. The MT5 scripts stay local; MetaEditor is not part of this pipeline.
+
+**CI** (`.github/workflows/ci.yml`) runs on every push and pull request. It executes `mvn verify` (all Java tests, then the shaded jar), uploads that jar, and builds the Docker image without publishing it.
+
+**Release** (`.github/workflows/release.yml`) is started from the Actions tab on `main`. Enter a version such as `1.2.0`. The workflow runs the tests, sets that version in `pom.xml`, commits it, pushes the annotated tag `v1.2.0`, publishes a GitHub Release with the jar attached, and pushes the image to GitHub Container Registry. A prerelease skips the `latest` image tag. Running the workflow again for a version that already has a tag rebuilds and republishes that tagged commit.
+
+The image name is the repository name in lowercase:
+
+```text
+ghcr.io/lesetjaricco-png/server:1.2.0
+ghcr.io/lesetjaricco-png/server:v1.2.0
+ghcr.io/lesetjaricco-png/server:latest
+```
+
+The container listens on port 8080 and reads the same environment variables as the jar. Do not bake `.env` or tokens into the image. Pass them at runtime:
+
+```powershell
+docker run --rm -p 5001:8080 `
+  -e AUTH_SHARED="your-shared-secret" `
+  -e LICHESS_TOKEN="your-lichess-token" `
+  ghcr.io/lesetjaricco-png/server:1.2.0
+```
+
+Before the first release, open the repository on GitHub and set **Settings → Actions → General → Workflow permissions** to **Read and write permissions**. The release job uses that permission to push the version commit, the git tag, the GitHub Release, and the container image. The package inherits this repository's visibility; change it later under **Packages** if you want a different audience.
 
 ## Configuration
 
@@ -79,7 +106,7 @@ All responses are JSON. Routes marked **authenticated** require the configured `
 
 The receiver posts state to `/receiver-state` about once per second and continues polling `/next`. The snapshot contains `receiverId`, `dayStartBalance`, `currentBalance`, `dailyClosedNet`, `lossesToday`, `spikesToday`, `secondsSinceLastLoss` (`-1` means no loss today), `scheduleOpen`, and `allPositionsAtBreakEven`. The server caches the latest snapshot and returns `changed_fields`/`changed_summary` on each post; the receiver logs only changed parameters, while unchanged posts still refresh the freshness timer. `/signal` is rejected unless a recent receiver snapshot passes the server-configured gates and the Lichess check passes. `/next` re-evaluates the latest receiver state before returning a queued signal; when state is stale or a gate is closed it returns an empty result and does not acknowledge the queued signal. Keep the receiver attached and publishing state before submitting signals.
 
-The `RECEIVER_*` limits are now authoritative for server-side gates. Keep their values aligned with the receiver's local risk/lot-sizing inputs where those inputs still affect MT5 order sizing. The server timestamps snapshots when received and fails closed after `RECEIVER_STATE_MAX_AGE_MS`.
+The `RECEIVER_*` limits are enforced only by the server. The receiver reports account, schedule, and position facts and sizes orders from its own risk and stop-distance inputs. `SpikeThresholdPct` on the receiver defines which closes increment `spikesToday`. Schedule windows are evaluated in MT5 and reported as `scheduleOpen`. The server timestamps snapshots when received and fails closed after `RECEIVER_STATE_MAX_AGE_MS`.
 
 `POST /signal` expects a JSON body with `side` (`BUY` or `SELL`), `symbol`, and positive `lots`. `ts` is optional and defaults to the current Unix timestamp in seconds.
 
@@ -115,7 +142,7 @@ Signals expire after five minutes. A successful signal is held as the single pen
 
 ## Receiver protocol tests
 
-`mql5/Include/ReceiverProtocol.mqh` contains the receiver's pure `/next` response parser, receiver-state JSON serializer, and signal-age rules. `mql5/Include/ReceiverDecisions.mqh` contains pure lot planning, margin fitting, deal accounting, and daily-reset transitions. The production EA and `mql5/Scripts/Tests/ReceiverProtocolTests.mq5` include these same files, so tests exercise production logic without accessing an account, broker data, network, or trade APIs.
+`mql5/Include/ReceiverProtocol.mqh` contains the receiver's pure `/next` response parser, receiver-state JSON serializer, and signal-age rules. `mql5/Include/ReceiverDecisions.mqh` contains pure lot planning, margin fitting, deal accounting, and daily-reset transitions. The production EA is `mql5/Experts/Receiver.mq5`; it reports facts and executes released signals. The EA and `mql5/Scripts/Tests/ReceiverProtocolTests.mq5` include the same pure helpers, so tests exercise production logic without accessing an account, broker data, network, or trade APIs.
 
 Compile `mql5/Scripts/Tests/ReceiverProtocolTests.mq5` with MetaEditor. Copy the resulting `ReceiverProtocolTests.ex5` into the terminal data folder's `MQL5/Scripts/UnitTests` directory, refresh the MT5 Navigator, then run **ReceiverProtocolTests** from Scripts. The test script prints each assertion and a final failure count in the terminal's Experts log. These are native MQL5 tests; they are separate from `mvn test`.
 

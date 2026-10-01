@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to release, for example 1.2.0
+        required: true
+        type: string
+      prerelease:
+        description: Mark the GitHub Release as a prerelease and skip the Docker latest tag
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag, release, and publish image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require main
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from the main branch."
+            exit 1
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Prepare version
+        id: prepare
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Version must look like 1.2.0 or 1.2.0-rc.1"
+            exit 1
+          fi
+          git fetch origin --tags --force
+          tag="v${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            git checkout --detach "${tag}"
+            echo "new_tag=false" >> "$GITHUB_OUTPUT"
+          else
+            mvn -B org.codehaus.mojo:versions-maven-plugin:2.18.0:set \
+              -DnewVersion="$VERSION" \
+              -DgenerateBackupPoms=false
+            echo "new_tag=true" >> "$GITHUB_OUTPUT"
+          fi
+          image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          {
+            echo "tags<<EOF"
+            echo "${image}:${VERSION}"
+            echo "${image}:${tag}"
+            if [ "$PRERELEASE" != "true" ]; then
+              echo "${image}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests and package
+        run: mvn -B verify
+
+      - name: Commit version and push tag
+        if: steps.prepare.outputs.new_tag == 'true'
+        env:
+          TAG: ${{ steps.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pom.xml
+          if ! git diff --cached --quiet; then
+            git commit -m "Release ${TAG}"
+          fi
+          git push origin HEAD:main
+          git tag -a "$TAG" -m "Release ${TAG}"
+          git push origin "$TAG"
+
+      - name: Record revision
+        id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.prepare.outputs.tag }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -f "target/server-java-${VERSION}.jar"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+            exit 0
+          fi
+          args=(release create "$TAG" "target/server-java-${VERSION}.jar" --title "$TAG" --generate-notes --target "$TAG")
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Publish image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.prepare.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.rev.outputs.sha }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server

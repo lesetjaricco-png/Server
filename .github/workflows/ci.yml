@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-package:
+    name: Test and package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Run tests and package
+        run: mvn -B verify
+
+      - name: Upload jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-java
+          path: target/server-java-*.jar
+          if-no-files-found: error
+
+      - name: Build image
+        uses: docker/setup-buildx-action@v3
+
+      - name: Check image build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: false
+          provenance: false
+          sbom: false
+          tags: server-java:ci
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server

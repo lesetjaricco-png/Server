@@ -82,15 +82,16 @@ void NukeForeignsByMagic()
 
 bool AllOurPositionsAtBE()
 {
-   int total = PositionsTotal();
-   PrintFormat("[RX] BE-check: total positions=%d (checking Magic=%d)", total, (int)Magic);
-   for(int index = 0; index < total; index++)
+   bool atBreakEven = true;
+   string reason = "";
+   for(int index = 0; index < PositionsTotal(); index++)
    {
       ulong ticket = PositionGetTicket(index);
       if(ticket == 0 || !PositionSelectByTicket(ticket))
       {
-         PrintFormat("[RX] BLOCK: cannot select ticket idx=%d -> fail BE check", index);
-         return false;
+         atBreakEven = false;
+         reason = "position could not be selected";
+         break;
       }
       if((long)PositionGetInteger(POSITION_MAGIC) != Magic) continue;
 
@@ -99,25 +100,28 @@ bool AllOurPositionsAtBE()
       double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double stopLoss = PositionGetDouble(POSITION_SL);
       double tolerance = 0.5 * GetSymbolPoint(symbol);
-      if(stopLoss <= 0.0)
+      if(stopLoss <= 0.0 ||
+         (type == POSITION_TYPE_BUY && stopLoss < entry - tolerance) ||
+         (type == POSITION_TYPE_SELL && stopLoss > entry + tolerance))
       {
-         PrintFormat("[RX] BLOCK: %s #%I64u no SL -> NOT at BE", symbol, ticket);
-         return false;
+         atBreakEven = false;
+         reason = StringFormat("%s #%I64u", symbol, ticket);
+         break;
       }
-      if(type == POSITION_TYPE_BUY && stopLoss < entry - tolerance)
-      {
-         PrintFormat("[RX] BLOCK: %s #%I64u BUY sl=%.5f entry=%.5f -> NOT BE", symbol, ticket, stopLoss, entry);
-         return false;
-      }
-      if(type == POSITION_TYPE_SELL && stopLoss > entry + tolerance)
-      {
-         PrintFormat("[RX] BLOCK: %s #%I64u SELL sl=%.5f entry=%.5f -> NOT BE", symbol, ticket, stopLoss, entry);
-         return false;
-      }
-      PrintFormat("[RX] BE-ok: %s #%I64u entry=%.5f sl=%.5f", symbol, ticket, entry, stopLoss);
    }
-   Print("[RX] BE-check PASSED: all our positions are at BE");
-   return true;
+
+   static bool lastResult = true;
+   static string lastReason = "";
+   if(atBreakEven != lastResult || reason != lastReason)
+   {
+      if(atBreakEven)
+         Print("[RX] Managed positions are at break-even");
+      else
+         Print("[RX] Break-even open: ", reason);
+      lastResult = atBreakEven;
+      lastReason = reason;
+   }
+   return atBreakEven;
 }
 
 void MaintainPositions()
@@ -140,37 +144,8 @@ void MaintainPositions()
       }
 
       double point = GetSymbolPoint(symbol);
-      double stopDistance = MathAbs(entry - stopLoss) / point;
-      double riskPoints = 0.0;
-      if(stopLoss > 0.0 && stopDistance > 0.0)
-      {
-         riskPoints = stopDistance;
-         PrintFormat("[AUTO-BE] %s #%I64u: Current SL distance = %.1f points (R)", symbol, ticket, riskPoints);
-      }
-      else
-      {
-         ENUM_INSTR_TYPE instrumentType = GetInstrumentType(symbol);
-         bool isGold = StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0;
-         if(instrumentType == INSTR_TYPE_FOREX)
-         {
-            riskPoints = ForexSpreadPoints > 0.0 && ForexSpreadMultiplier > 0.0
-               ? ForexSpreadPoints * ForexSpreadMultiplier : 50.0;
-         }
-         else if(instrumentType == INSTR_TYPE_COMMODITY)
-         {
-            if(isGold && UseGoldSpecificSettings && FixedSLPoints_Gold > 0.0)
-               riskPoints = FixedSLPoints_Gold;
-            else if(FixedSLPoints_Commodities > 0.0)
-               riskPoints = FixedSLPoints_Commodities;
-            else
-               riskPoints = GetSafeStopPoints(symbol);
-         }
-         else
-         {
-            riskPoints = instrumentType == INSTR_TYPE_INDEX ? FixedSLPoints_Indices : FixedSLPoints_Other;
-            if(riskPoints <= 0.0) riskPoints = GetSafeStopPoints(symbol);
-         }
-      }
+      double stopDistance = stopLoss > 0.0 ? MathAbs(entry - stopLoss) / point : 0.0;
+      double riskPoints = stopDistance > 0.0 ? stopDistance : GetSafeStopPoints(symbol);
 
       if(riskPoints <= 0.0)
       {
@@ -187,9 +162,6 @@ void MaintainPositions()
       }
       double current = type == POSITION_TYPE_BUY ? tick.bid : tick.ask;
       double movePoints = MathAbs(current - entry) / point;
-      PrintFormat("[AUTO-BE] %s #%I64u: Move = %.1f pts, %.1fR = %.1f pts, SL=%.5f",
-                  symbol, ticket, movePoints, AutoBE_Multiplier, AutoBE_Multiplier * riskPoints, stopLoss);
-
       if(movePoints >= AutoBE_Multiplier * riskPoints - 0.5)
       {
          double desiredStop = entry;
@@ -213,8 +185,6 @@ void MaintainPositions()
                            Trade.ResultRetcode(), Trade.ResultRetcodeDescription(), symbol, ticket);
             }
          }
-         else
-            PrintFormat("[AUTO-BE] %s #%I64u: Already at BE or better", symbol, ticket);
       }
       if(stopLoss > 0.0) ObserveOrSetBoundary(ticket, type, stopLoss);
    }

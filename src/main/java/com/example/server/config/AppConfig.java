@@ -92,7 +92,7 @@ public record AppConfig(
                     continue;
                 }
                 String key = line.substring(0, delimiter).trim();
-                String value = line.substring(delimiter + 1).trim();
+                String value = stripInlineComment(line.substring(delimiter + 1).trim());
                 if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
                     value = value.substring(1, value.length() - 1);
                 }
@@ -106,5 +106,20 @@ public record AppConfig(
 
     static Optional<String> dotEnvValue(String key) {
         return Optional.ofNullable(loadDotEnv().get(key));
+    }
+
+    static String stripInlineComment(String value) {
+        if (value.startsWith("\"")) {
+            return value;
+        }
+        for (int index = 1; index < value.length(); index++) {
+            if (!Character.isWhitespace(value.charAt(index - 1))) {
+                continue;
+            }
+            if (value.startsWith("//", index) || value.charAt(index) == '#') {
+                return value.substring(0, index).trim();
+            }
+        }
+        return value.trim();
     }
 }

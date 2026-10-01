@@ -1,6 +1,9 @@
 #ifndef RECEIVER_DECISIONS_MQH
 #define RECEIVER_DECISIONS_MQH
 
+// Pure order-sizing and daily-fact helpers. Loss, profit, cooldown, spike-count,
+// and break-even gates are evaluated by the server from the facts the EA reports.
+
 struct ReceiverLotPlan
 {
    bool valid;
@@ -15,20 +18,11 @@ struct ReceiverDailyState
 {
    long day_anchor;
    double start_balance;
-   double loss_limit;
-   double profit_target;
    double closed_net;
-   int trades;
    int losses;
    int spikes;
    long last_loss_time;
 };
-
-bool ReceiverCooldownIsActive(const long now, const long last_loss_time, const int cooldown_minutes)
-{
-   if(last_loss_time <= 0) return false;
-   return now - last_loss_time < (long)cooldown_minutes * 60;
-}
 
 bool ReceiverIsLosingClosedDeal(
    const bool belongs_to_receiver,
@@ -74,7 +68,7 @@ bool ReceiverApplyClosedDeal(
       return false;
 
    state.closed_net += net;
-   was_spike = MathAbs(net) >= spike_threshold;
+   was_spike = spike_threshold > 0.0 && spike_threshold < DBL_MAX && MathAbs(net) >= spike_threshold;
    if(was_spike)
       state.spikes++;
 
@@ -82,7 +76,8 @@ bool ReceiverApplyClosedDeal(
    if(was_loss)
    {
       state.losses++;
-      state.last_loss_time = close_time;
+      if(close_time > state.last_loss_time)
+         state.last_loss_time = close_time;
    }
    return true;
 }
@@ -159,8 +154,6 @@ bool ReceiverSnapLots(
 ReceiverLotPlan ReceiverCalculateLotPlan(
    const double equity,
    const double risk_percent,
-   const double day_start_balance,
-   const double daily_loss_limit,
    const double stop_points,
    const double value_per_point_per_lot,
    const double minimum_lots,
@@ -181,10 +174,7 @@ ReceiverLotPlan ReceiverCalculateLotPlan(
       value_per_point_per_lot <= 0.0 || minimum_lots <= 0.0 || maximum_lots < minimum_lots)
       return result;
 
-   result.risk_budget = MathMax(0.0, equity * risk_percent / 100.0);
-   double used = MathMax(0.0, day_start_balance - equity);
-   double remaining_daily_loss = MathMax(0.0, daily_loss_limit - used);
-   result.risk_budget = MathMin(result.risk_budget, remaining_daily_loss);
+   result.risk_budget = equity * risk_percent / 100.0;
    if(result.risk_budget <= 0.0)
    {
       result.failure = "risk budget exhausted";
@@ -259,20 +249,15 @@ bool ReceiverCalculateStopPrice(
 bool ReceiverApplyDailyReset(
    ReceiverDailyState &state,
    const long current_day_anchor,
-   const double current_balance,
-   const double loss_percent,
-   const double profit_percent
+   const double start_balance
 )
 {
    if(current_day_anchor == state.day_anchor)
       return false;
 
    state.day_anchor = current_day_anchor;
-   state.start_balance = current_balance;
-   state.loss_limit = current_balance * loss_percent / 100.0;
-   state.profit_target = current_balance * profit_percent / 100.0;
+   state.start_balance = start_balance;
    state.closed_net = 0.0;
-   state.trades = 0;
    state.losses = 0;
    state.spikes = 0;
    state.last_loss_time = 0;

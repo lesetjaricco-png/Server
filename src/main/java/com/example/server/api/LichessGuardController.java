@@ -54,7 +54,7 @@ public class LichessGuardController {
             var snapshot = ctx.bodyAsClass(GuardModels.ReceiverStateSnapshot.class);
             var receipt = service.updateReceiverState(snapshot);
             ctx.json(LichessGuardResponses.receiverState(receipt));
-        } catch (RuntimeException e) {
+        } catch (Exception e) {
             ctx.status(400).json(LichessGuardResponses.error("invalid receiver state"));
         }
     }

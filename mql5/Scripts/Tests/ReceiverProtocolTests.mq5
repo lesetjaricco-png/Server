@@ -87,21 +87,12 @@ void TestReceiverStateJsonContract()
    AssertTrue(!ReceiverJsonTrue(json, "allPositionsAtBreakEven"), "state JSON includes break-even boolean");
 }
 
-void TestCooldownBoundary()
-{
-   AssertTrue(ReceiverCooldownIsActive(10000, 9701, 5), "cooldown blocks immediately before boundary");
-   AssertTrue(!ReceiverCooldownIsActive(10001, 9701, 5), "cooldown opens exactly at boundary");
-}
-
 void TestLossDealAccountingAndDeduplication()
 {
    ReceiverDailyState daily;
    daily.day_anchor = 0;
    daily.start_balance = 10000.0;
-   daily.loss_limit = 300.0;
-   daily.profit_target = 200.0;
    daily.closed_net = 0.0;
-   daily.trades = 0;
    daily.losses = 0;
    daily.spikes = 0;
    daily.last_loss_time = 0;
@@ -149,28 +140,14 @@ void TestStopSelectionAndPrice()
 
 void TestLotRiskAndMarginPlanning()
 {
-   ReceiverLotPlan plan = ReceiverCalculateLotPlan(10000.0, 1.0, 10000.0, 300.0, 50.0, 10.0,
-                                                   0.01, 100.0, 0.01, 100.0);
+   ReceiverLotPlan plan = ReceiverCalculateLotPlan(10000.0, 1.0, 50.0, 10.0, 0.01, 100.0, 0.01, 100.0);
    AssertTrue(plan.valid && MathAbs(plan.risk_budget - 100.0) < 1e-8, "risk budget uses configured equity percentage");
    AssertTrue(MathAbs(plan.raw_lots - 0.2) < 1e-8 && MathAbs(plan.lots - 0.2) < 1e-8,
               "calculate and normalize risk-based lots");
 
-   plan = ReceiverCalculateLotPlan(100.0, 0.1, 100.0, 100.0, 500.0, 10.0,
-                                   0.01, 100.0, 0.01, 100.0);
+   plan = ReceiverCalculateLotPlan(100.0, 0.1, 500.0, 10.0, 0.01, 100.0, 0.01, 100.0);
    AssertTrue(!plan.valid && plan.failure == "risk budget below minimum volume",
               "reject minimum lot when it would exceed risk budget");
-
-   plan = ReceiverCalculateLotPlan(9900.0, 5.0, 10000.0, 300.0, 50.0, 10.0,
-                                   0.01, 100.0, 0.01, 100.0);
-   AssertTrue(MathAbs(plan.risk_budget - 200.0) < 1e-8, "remaining daily-loss room caps per-trade risk budget");
-
-   plan = ReceiverCalculateLotPlan(9800.0, 1.0, 10000.0, 300.0, 50.0, 10.0,
-                                   0.01, 100.0, 0.01, 100.0);
-   AssertTrue(MathAbs(plan.risk_budget - 98.0) < 1e-8, "risk budget remains below daily loss room");
-
-   plan = ReceiverCalculateLotPlan(9700.0, 1.0, 10000.0, 300.0, 50.0, 10.0,
-                                   0.01, 100.0, 0.01, 100.0);
-   AssertTrue(!plan.valid && plan.failure == "risk budget exhausted", "reject when daily loss room is exhausted");
 
    double snapped = 0.0;
    AssertTrue(ReceiverSnapLots(0.127, 0.01, 10.0, 0.01, snapped) && MathAbs(snapped - 0.12) < 1e-8,
@@ -192,22 +169,18 @@ void TestDailyResetTransitions()
    ReceiverDailyState state;
    state.day_anchor = 100;
    state.start_balance = 10000.0;
-   state.loss_limit = 300.0;
-   state.profit_target = 200.0;
    state.closed_net = 75.0;
-   state.trades = 3;
    state.losses = 1;
    state.spikes = 1;
    state.last_loss_time = 150;
 
-   AssertTrue(!ReceiverApplyDailyReset(state, 100, 11000.0, 3.0, 2.0), "same-day update does not reset state");
-   AssertTrue(state.trades == 3 && state.closed_net == 75.0, "same-day state remains unchanged");
+   AssertTrue(!ReceiverApplyDailyReset(state, 100, 11000.0), "same-day update does not reset state");
+   AssertTrue(state.closed_net == 75.0 && state.losses == 1, "same-day state remains unchanged");
 
-   AssertTrue(ReceiverApplyDailyReset(state, 200, 12000.0, 3.0, 2.0), "new day triggers reset");
+   AssertTrue(ReceiverApplyDailyReset(state, 200, 12000.0), "new day triggers reset");
    AssertTrue(state.day_anchor == 200 && state.start_balance == 12000.0, "new day sets anchor and balance");
-   AssertTrue(state.loss_limit == 360.0 && state.profit_target == 240.0, "new day recalculates risk thresholds");
-   AssertTrue(state.closed_net == 0.0 && state.trades == 0 && state.losses == 0 && state.spikes == 0 && state.last_loss_time == 0,
-              "new day clears daily counters and cooldown");
+   AssertTrue(state.closed_net == 0.0 && state.losses == 0 && state.spikes == 0 && state.last_loss_time == 0,
+              "new day clears daily counters");
 }
 
 void OnStart()
@@ -217,7 +190,6 @@ void OnStart()
    TestHandlesEmptyAndInvalidResponses();
    TestSignalAgeBoundaries();
    TestReceiverStateJsonContract();
-   TestCooldownBoundary();
    TestLossDealAccountingAndDeduplication();
    TestStopSelectionAndPrice();
    TestLotRiskAndMarginPlanning();

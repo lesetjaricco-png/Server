@@ -1,7 +1,7 @@
 #ifndef RECEIVER_SIGNAL_WORKFLOW_MQH
 #define RECEIVER_SIGNAL_WORKFLOW_MQH
 
-// Included by Receiver.mq5 after the receiver's helpers and globals are defined.
+// Polls /next and executes a signal the server has already released.
 
 bool AcknowledgePendingSignal(const string headers)
 {
@@ -17,21 +17,15 @@ void ProcessPendingServerSignal()
    if(!ReceiverJsonTrue(body, "ok") || ReceiverJsonTrue(body, "empty")) return;
 
    ReceiverSignal signal;
-   if(!ReceiverParseSignal(body, signal))
+   if(!ReceiverParseSignal(body, signal) || !signal.has_signal)
    {
-      if(ReceiverJsonTrue(body, "ok") && !ReceiverJsonTrue(body, "empty"))
-      {
-         Print("[RX] Invalid signal payload; acknowledging to avoid repeated polling");
-         AcknowledgePendingSignal(headers);
-      }
+      Print("[RX] Invalid signal payload; acknowledging so it is not polled again");
+      AcknowledgePendingSignal(headers);
       return;
    }
-   if(!signal.has_signal) return;
 
-   string signalId = signal.id;
-   if(signalId != "" && signalId == g_lastAckedSignalID)
+   if(signal.id != "" && signal.id == g_lastAckedSignalID)
    {
-      Print("[DEDUPE] Already processed signal: ", signalId);
       AcknowledgePendingSignal(headers);
       return;
    }
@@ -39,7 +33,7 @@ void ProcessPendingServerSignal()
    long ageSeconds = 0;
    if(ReceiverSignalExpired(signal, (long)TimeGMT(), SignalMaxAgeSeconds, ageSeconds))
    {
-      NotifyGateBlocked("Signal Expired", StringFormat("Age: %d seconds > %d seconds", ageSeconds, SignalMaxAgeSeconds));
+      PrintFormat("[RX] Signal expired (%d s old, max %d s)", ageSeconds, SignalMaxAgeSeconds);
       LogToFile("[SIGNAL_EXPIRED] Age: " + IntegerToString(ageSeconds) + "s");
       AcknowledgePendingSignal(headers);
       return;
@@ -47,64 +41,25 @@ void ProcessPendingServerSignal()
 
    string side = signal.side;
    string symbol = signal.symbol;
-   string requestedLots = signal.lots_text;
-   PrintFormat("[RX] ======= PROCESSING SIGNAL =======");
-   PrintFormat("[RX] Signal: %s %s | Magic: %d", side, symbol, Magic);
-
-   if(!EnsureSymbolInMarketWatch(symbol))
-   {
-      PrintFormat("[RX] CRITICAL: %s not available in Market Watch. Signal rejected.", symbol);
-      AcknowledgePendingSignal(headers);
-      return;
-   }
-
-   Print("[RX] Processing signal - server gates passed");
+   PrintFormat("[RX] Signal %s %s", side, symbol);
    LogToFile("[SIGNAL_RECEIVED] " + side + " " + symbol);
 
-   if(side != "BUY" && side != "SELL")
+   if(!EnsureSymbolInMarketWatch(symbol) || !PrepareSymbol(symbol))
    {
-      Print("[RX] Invalid side: " + side);
-      AcknowledgePendingSignal(headers);
-      return;
-   }
-   if(symbol == "")
-   {
-      Print("[RX] Empty symbol");
-      AcknowledgePendingSignal(headers);
-      return;
-   }
-   if(!PrepareSymbol(symbol))
-   {
-      Print("[RX] Cannot prepare symbol: " + symbol);
+      PrintFormat("[RX] Symbol unavailable: %s", symbol);
       AcknowledgePendingSignal(headers);
       return;
    }
 
-   double dynamicLots = 0.0;
+   double lots = 0.0;
    double stopLossPrice = 0.0;
    double entryPrice = 0.0;
-   bool hasDynamicPlan = CalcDynamicLots(symbol, side, dynamicLots, stopLossPrice, entryPrice);
-
-   if(!hasDynamicPlan || dynamicLots <= 0.0)
+   if(!CalcDynamicLots(symbol, side, lots, stopLossPrice, entryPrice))
    {
-      Print("[RX] Dynamic lot calculation failed, using fallback");
-      if(requestedLots == "")
+      lots = signal.lots;
+      if(!SnapLots(symbol, lots))
       {
-         Print("[RX] ERROR: Dynamic lots failed and no static lots provided");
-         AcknowledgePendingSignal(headers);
-         return;
-      }
-
-      dynamicLots = StringToDouble(requestedLots);
-      if(dynamicLots <= 0.0)
-      {
-         Print("[RX] ERROR: Invalid static lots: " + requestedLots);
-         AcknowledgePendingSignal(headers);
-         return;
-      }
-      if(!SnapLots(symbol, dynamicLots))
-      {
-         Print("[RX] ERROR: Cannot snap static lots for: " + symbol);
+         Print("[RX] Lot calculation failed");
          AcknowledgePendingSignal(headers);
          return;
       }
@@ -112,74 +67,46 @@ void ProcessPendingServerSignal()
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick))
       {
-         Print("[RX] ERROR: Cannot get tick data for fallback");
+         Print("[RX] No tick for fallback stop");
          AcknowledgePendingSignal(headers);
          return;
       }
       entryPrice = side == "BUY" ? tick.ask : tick.bid;
-
-      ENUM_INSTR_TYPE instrumentType = GetInstrumentType(symbol);
-      bool isGold = StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0;
-      double fixedPoints = ReceiverSelectStopPoints(
-         instrumentType == INSTR_TYPE_FOREX,
-         instrumentType == INSTR_TYPE_COMMODITY,
-         isGold,
-         instrumentType == INSTR_TYPE_INDEX,
-         UseGoldSpecificSettings,
-         ForexSpreadPoints,
-         ForexSpreadMultiplier,
-         FixedSLPoints_Gold,
-         FixedSLPoints_Commodities,
-         FixedSLPoints_Indices,
-         FixedSLPoints_Other,
-         GetSafeStopPoints(symbol)
-      );
-      double pointSize = GetSymbolPoint(symbol);
-      double stopDistance = fixedPoints * pointSize;
-      stopLossPrice = side == "BUY" ? tick.bid - stopDistance : tick.ask + stopDistance;
+      if(!ReceiverCalculateStopPrice(side == "BUY", entryPrice, GetSafeStopPoints(symbol), GetSymbolPoint(symbol), stopLossPrice))
+      {
+         Print("[RX] Fallback stop price failed");
+         AcknowledgePendingSignal(headers);
+         return;
+      }
    }
 
-   if(stopLossPrice <= 0.0 || entryPrice <= 0.0)
-   {
-      Print("[RX] CRITICAL: Invalid prices - Entry: ", entryPrice, ", SL: ", stopLossPrice);
-      LogToFile("[VALIDATION_FAILED] Invalid prices");
-      AcknowledgePendingSignal(headers);
-      return;
-   }
-   if((side == "BUY" && stopLossPrice >= entryPrice) ||
+   if(stopLossPrice <= 0.0 || entryPrice <= 0.0 ||
+      (side == "BUY" && stopLossPrice >= entryPrice) ||
       (side == "SELL" && stopLossPrice <= entryPrice))
    {
-      Print("[RX] ERROR: Stop loss is in wrong direction!");
-      LogToFile("[VALIDATION_FAILED] Wrong SL direction");
+      PrintFormat("[RX] Invalid trade prices entry=%.5f sl=%.5f", entryPrice, stopLossPrice);
+      LogToFile("[VALIDATION_FAILED] Invalid prices");
       AcknowledgePendingSignal(headers);
       return;
    }
 
    if(EnableMinStopDistance)
    {
-      double pointSize = GetSymbolPoint(symbol);
-      double minimumDistance = MinStopDistancePoints * pointSize;
+      double minimumDistance = MinStopDistancePoints * GetSymbolPoint(symbol);
       if(MathAbs(entryPrice - stopLossPrice) < minimumDistance)
-      {
-         PrintFormat("[RX] WARNING: SL too close (%.5f price units). Adjusting to minimum %.5f price units.",
-                     MathAbs(entryPrice - stopLossPrice), minimumDistance);
          stopLossPrice = side == "BUY" ? entryPrice - minimumDistance : entryPrice + minimumDistance;
-      }
    }
 
-   PrintFormat("[RX] Final trade parameters: %s %s Entry=%.5f Lots=%.6f SL=%.5f",
-               side, symbol, entryPrice, dynamicLots, stopLossPrice);
-
-   if(!SafeTradeExecute(symbol, side, dynamicLots, stopLossPrice))
+   PrintFormat("[RX] %s %s lots=%.6f entry=%.5f sl=%.5f", side, symbol, lots, entryPrice, stopLossPrice);
+   if(!SafeTradeExecute(symbol, side, lots, stopLossPrice))
    {
       PrintFormat("[RX] Trade failed: ret=%d (%s)", Trade.ResultRetcode(), Trade.ResultRetcodeDescription());
       AcknowledgePendingSignal(headers);
       return;
    }
 
-   Print("[RX] Trade executed successfully with SL");
-   LogToFile("[TRADE_EXECUTED] " + side + " " + symbol + " Lots:" + DoubleToString(dynamicLots, 6));
-   if(signalId != "") g_lastAckedSignalID = signalId;
+   LogToFile("[TRADE_EXECUTED] " + side + " " + symbol + " Lots:" + DoubleToString(lots, 6));
+   if(signal.id != "") g_lastAckedSignalID = signal.id;
 
    for(int index = 0; index < PositionsTotal(); index++)
    {
@@ -187,16 +114,13 @@ void ProcessPendingServerSignal()
       if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
       if((long)PositionGetInteger(POSITION_MAGIC) != Magic) continue;
       if(PositionGetString(POSITION_SYMBOL) != symbol) continue;
-      long type = (long)PositionGetInteger(POSITION_TYPE);
       double stopLoss = PositionGetDouble(POSITION_SL);
-      if(stopLoss > 0.0) ObserveOrSetBoundary(ticket, type, stopLoss);
+      if(stopLoss > 0.0)
+         ObserveOrSetBoundary(ticket, (long)PositionGetInteger(POSITION_TYPE), stopLoss);
    }
 
-   g_tradesToday++;
    if(!AcknowledgePendingSignal(headers))
-      Print("[RX] WARN: /ack failed (signal may repeat)");
-   else
-      Print("[RX] Signal processed successfully");
+      Print("[RX] /ack failed; the signal may be offered again");
 }
 
 #endif

@@ -23,7 +23,7 @@ bool CalcDynamicLots(const string symbol, const string side,
    entry_price_out = entryPrice;
 
    ENUM_INSTR_TYPE instrumentType = GetInstrumentType(symbol);
-   bool isGold = StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "GOLD") >= 0;
+   bool isGold = IsGoldSymbol(symbol);
    double stopPoints = ReceiverSelectStopPoints(
       instrumentType == INSTR_TYPE_FOREX,
       instrumentType == INSTR_TYPE_COMMODITY,
@@ -74,8 +74,6 @@ bool CalcDynamicLots(const string symbol, const string side,
    ReceiverLotPlan plan = ReceiverCalculateLotPlan(
       AccountInfoDouble(ACCOUNT_EQUITY),
       g_effRiskPerTradePct,
-      g_equityAtDayStart,
-      g_equityLossLimit,
       stopPoints,
       valuePerPoint,
       volumeMin,
