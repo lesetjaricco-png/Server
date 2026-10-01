@@ -54,6 +54,13 @@ Settings are read in this order: process environment, `.env` in the current work
 | `LICHESS_LOOKBACK_MIN` | `30` | Recent-game and cache-window duration in minutes. |
 | `LICHESS_MAX_GAMES_TO_PARSE` | `200` | Maximum number of recent games requested from Lichess. |
 | `FAIL_OPEN_ON_LICHESS_ERROR` | `0` | When true (`1`, `true`, or `yes`), treat Lichess request errors as a pass. Keep disabled unless fail-open behavior is intentional. |
+| `RECEIVER_DAILY_LOSS_CAP_PCT` | `3.0` | Server-side daily balance drawdown limit as a percentage of the receiver's reported day-start balance. |
+| `RECEIVER_DAILY_PROFIT_TARGET_PCT` | `2.0` | Server-side daily closed-profit target as a percentage of day-start balance. |
+| `RECEIVER_MAX_LOSSES_PER_DAY` | `5` | Maximum counted losing closing deals reported by MT5. |
+| `RECEIVER_MAX_SPIKES_PER_DAY` | `2` | Maximum daily spikes reported by MT5. |
+| `RECEIVER_COOLDOWN_AFTER_LOSS_MIN` | `5` | Server-enforced cooldown duration after the latest reported losing close. |
+| `RECEIVER_REQUIRE_ALL_AT_BE` | `true` | Require the receiver to report all managed positions at break-even. |
+| `RECEIVER_STATE_MAX_AGE_MS` | `5000` | Maximum server receipt age for the MT5 state snapshot. Older/missing snapshots fail closed. |
 
 ## HTTP API
 
@@ -63,11 +70,16 @@ All responses are JSON. Routes marked **authenticated** require the configured `
 | --- | --- | --- |
 | `GET /health` | No | Returns basic health, last readiness state, and cache information. |
 | `POST /warmup` | Yes | Runs a Lichess check immediately and caches a successful result for the current window. |
+| `POST /receiver-state` | Yes | Publishes the latest MT5 account, daily-risk, schedule, cooldown, and position facts for server-side gate evaluation. |
 | `GET /cache-status` | Yes | Returns cache state and time remaining in the current window. |
 | `GET /clear-cache` | Yes | Clears all cached PASS entries. |
 | `POST /signal` | Yes | Validates and stores a signal if the Lichess gate passes. |
 | `GET /next` | Yes | Reads the pending signal. It does not remove it. |
 | `GET /ack` | Yes | Clears the pending signal. |
+
+The receiver posts state to `/receiver-state` about once per second and continues polling `/next`. The snapshot contains `receiverId`, `dayStartBalance`, `currentBalance`, `dailyClosedNet`, `lossesToday`, `spikesToday`, `secondsSinceLastLoss` (`-1` means no loss today), `scheduleOpen`, and `allPositionsAtBreakEven`. The server caches the latest snapshot and returns `changed_fields`/`changed_summary` on each post; the receiver logs only changed parameters, while unchanged posts still refresh the freshness timer. `/signal` is rejected unless a recent receiver snapshot passes the server-configured gates and the Lichess check passes. `/next` re-evaluates the latest receiver state before returning a queued signal; when state is stale or a gate is closed it returns an empty result and does not acknowledge the queued signal. Keep the receiver attached and publishing state before submitting signals.
+
+The `RECEIVER_*` limits are now authoritative for server-side gates. Keep their values aligned with the receiver's local risk/lot-sizing inputs where those inputs still affect MT5 order sizing. The server timestamps snapshots when received and fails closed after `RECEIVER_STATE_MAX_AGE_MS`.
 
 `POST /signal` expects a JSON body with `side` (`BUY` or `SELL`), `symbol`, and positive `lots`. `ts` is optional and defaults to the current Unix timestamp in seconds.
 
@@ -87,20 +99,24 @@ Signals expire after five minutes. A successful signal is held as the single pen
 - Use `HOST=127.0.0.1` unless remote access is required. Binding to `0.0.0.0` listens on all network interfaces.
 - This service uses plain HTTP. Do not expose it directly to the public internet; put it behind an appropriately configured TLS reverse proxy and restrict network access.
 - Treat Lichess API tokens and shared secrets as credentials. Do not put real credentials in source control or share terminal logs containing them.
+- Receiver-state values are reported by the authenticated MT5 client. The server validates their shape and freshness and applies its own thresholds, but cannot independently prove that a client-reported balance or position state is truthful. Use this only with a trusted terminal and protect the shared token and network path.
 
 ## Project layout
 
-- `src/main/java/com/example/server/LichessGuardApplication.java` loads configuration, assembles dependencies, starts Javalin, and handles process shutdown.
-- `src/main/java/com/example/server/LichessGuardController.java` registers HTTP routes, parses request data, and sets HTTP statuses.
-- `src/main/java/com/example/server/LichessGuardResponses.java` maps application outcomes to the JSON API contract.
-- `src/main/java/com/example/server/LichessGuardService.java` orchestrates application use cases.
-- `src/main/java/com/example/server/AppConfig.java` loads runtime configuration from process variables and `.env`.
-- `src/main/java/com/example/server/LichessClient.java` calls Lichess and parses account/game data through the `LichessGateway` interface.
-- `src/main/java/com/example/server/EligibilityPolicy.java` applies rating, game-count, and win-rate requirements.
-- `src/main/java/com/example/server/ApiAuthenticator.java` checks the shared route token.
-- `src/main/java/com/example/server/PassCache.java` stores successful Lichess checks by account and time window.
-- `src/main/java/com/example/server/SignalPolicy.java` validates and normalizes signal values.
-- `src/main/java/com/example/server/SignalStore.java` stores, expires, and acknowledges the pending signal.
-- `src/main/java/com/example/server/ReadinessTracker.java` tracks the latest check result for health reporting.
-- `src/main/java/com/example/server/GuardModels.java` contains immutable values exchanged between these components.
-- `s.py` is the original Python server implementation.
+- `src/main/java/com/example/server/bootstrap` loads configuration, assembles dependencies, and starts/stops Javalin.
+- `src/main/java/com/example/server/api` owns Javalin routes, authentication, HTTP statuses, and JSON response mapping.
+- `src/main/java/com/example/server/application` coordinates use cases across the domain and state components.
+- `src/main/java/com/example/server/config` loads runtime settings from process variables and `.env`.
+- `src/main/java/com/example/server/domain` contains immutable models, signal/eligibility policies, and the Lichess gateway interface.
+- `src/main/java/com/example/server/integration/lichess` implements external Lichess API calls and response parsing.
+- `src/main/java/com/example/server/state` owns caches, signal storage, readiness, receiver snapshots, and gate evaluation.
+- `src/test/java/com/example/server` mirrors the production package groupings for focused tests.
+- `legacy/python/s.py` is the original Python server implementation.
+
+## Receiver protocol tests
+
+`mql5/Include/ReceiverProtocol.mqh` contains the receiver's pure `/next` response parser, receiver-state JSON serializer, and signal-age rules. `mql5/Include/ReceiverDecisions.mqh` contains pure lot planning, margin fitting, deal accounting, and daily-reset transitions. The production EA and `mql5/Scripts/Tests/ReceiverProtocolTests.mq5` include these same files, so tests exercise production logic without accessing an account, broker data, network, or trade APIs.
+
+Compile `mql5/Scripts/Tests/ReceiverProtocolTests.mq5` with MetaEditor. Copy the resulting `ReceiverProtocolTests.ex5` into the terminal data folder's `MQL5/Scripts/UnitTests` directory, refresh the MT5 Navigator, then run **ReceiverProtocolTests** from Scripts. The test script prints each assertion and a final failure count in the terminal's Experts log. These are native MQL5 tests; they are separate from `mvn test`.
+
+The MT5 source is organized as `mql5/Experts` (Sender and Receiver EAs), `mql5/Include` (shared protocol and decision logic), and `mql5/Scripts/Tests` (native unit-test script). The server remains a Maven project at the repository root, with Java sources under `src/`.
