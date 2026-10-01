@@ -38,7 +38,7 @@ The same variables can be set in Command Prompt with `set HOST=127.0.0.1` and `s
 
 GitHub Actions runs the Java tests. The MT5 scripts stay local; MetaEditor is not part of this pipeline.
 
-**CI** (`.github/workflows/ci.yml`) runs on every push and pull request. It executes `mvn verify` (all Java tests, then the shaded jar), uploads that jar, and builds the Docker image without publishing it.
+**CI** (`.github/workflows/ci.yml`) runs on every push and pull request. It executes `mvn verify` (all Java tests, then the shaded jar) and uploads that jar. `main` accepts updates only through a pull request whose **Test and package** check has passed. After that pull request is merged, the same workflow publishes `ghcr.io/lesetjaricco-png/server:latest` and `ghcr.io/lesetjaricco-png/server:<commit sha>`. Other branches build the image without publishing it.
 
 **Release** (`.github/workflows/release.yml`) is started from the Actions tab on `main`. Enter a version such as `1.2.0`. The workflow runs the tests, sets that version in `pom.xml`, commits it, pushes the annotated tag `v1.2.0`, publishes a GitHub Release with the jar attached, and pushes the image to GitHub Container Registry. A prerelease skips the `latest` image tag. Running the workflow again for a version that already has a tag rebuilds and republishes that tagged commit.
 
