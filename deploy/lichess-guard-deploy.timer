@@ -1,0 +1,11 @@
+[Unit]
+Description=Open the Lichess Guard deployment window
+
+[Timer]
+OnCalendar=*-*-* 00:00:00
+Persistent=false
+AccuracySec=30s
+Unit=lichess-guard-deploy.service
+
+[Install]
+WantedBy=timers.target
