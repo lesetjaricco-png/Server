@@ -109,7 +109,7 @@ The receiver posts state to `/receiver-state` about once per second and continue
 The `RECEIVER_*` limits are enforced only by the server. The receiver reports account, schedule, and position facts and sizes orders from its own risk and stop-distance inputs. `SpikeThresholdPct` on the receiver defines which closes increment `spikesToday`. Schedule windows are evaluated in MT5 and reported as `scheduleOpen`. The server timestamps snapshots when received and fails closed after `RECEIVER_STATE_MAX_AGE_MS`.
 
 `POST /signal` expects a JSON body with `side` (`BUY` or `SELL`), `symbol`, and positive `lots`. `ts` is optional and defaults to the current Unix timestamp in seconds.
-/////////////////////////////////
+/////////////////////////////////this is a nice test//////////////////////////////////////////////////////////////////////////////
 Example PowerShell request:
 
 ```powershell
