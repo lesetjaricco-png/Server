@@ -70,6 +70,7 @@ final class LichessGuardResponses {
         response.put("cache_system", "pass_once_per_window");
         response.put("cache_size", cacheSize);
         response.put("current_cache_hit", ready != null);
+        response.put("revision", "cicd-1");
         return response;
     }
 
