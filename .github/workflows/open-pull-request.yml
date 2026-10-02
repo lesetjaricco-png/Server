@@ -1,0 +1,64 @@
+name: Open pull request
+
+# Runs on the pushed branch. A repository secret named PR_AUTOMATION_TOKEN
+# (a fine-grained PAT with Contents and Pull requests read/write on this
+# repository) creates the pull request and enables auto-merge. The default
+# GITHUB_TOKEN is not used for that, because a merge it performs does not
+# start the CI workflow on main.
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    name: Open pull request
+    if: github.ref_type == 'branch' && github.ref_name != 'main' && !startsWith(github.ref_name, 'dependabot/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open pull request and enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.PR_AUTOMATION_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::Set the repository secret PR_AUTOMATION_TOKEN to a fine-grained personal access token with Contents and Pull requests read/write on this repository. Also enable Settings → General → Allow auto-merge. The default GITHUB_TOKEN cannot merge into main and still start CI."
+            exit 1
+          fi
+
+          head="${OWNER}:${BRANCH}"
+          number="$(gh pr list --repo "$REPO" --base main --head "$head" --state open --json number --jq '.[0].number')"
+
+          if [ -z "$number" ]; then
+            title="$(gh api "repos/${REPO}/commits/${SHA}" --jq '.commit.message' | awk 'NR==1 { print; exit }')"
+            if [ -z "$title" ]; then
+              title="Merge ${BRANCH} into main"
+            fi
+            if ! gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body "Opened automatically from a push to \`${BRANCH}\`."; then
+              number="$(gh pr list --repo "$REPO" --base main --head "$head" --state open --json number --jq '.[0].number')"
+              if [ -z "$number" ]; then
+                exit 1
+              fi
+            else
+              number="$(gh pr list --repo "$REPO" --base main --head "$head" --state open --json number --jq '.[0].number')"
+            fi
+          fi
+
+          if [ -z "$number" ]; then
+            echo "::error::No open pull request for ${BRANCH} into main."
+            exit 1
+          fi
+
+          gh pr merge "$number" --repo "$REPO" --auto --merge
