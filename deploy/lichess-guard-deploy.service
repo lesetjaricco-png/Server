@@ -1,0 +1,10 @@
+[Unit]
+Description=Lichess Guard deployment
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/lichess-guard-deploy
+TimeoutStartSec=300
+Nice=10
