@@ -46,13 +46,13 @@ jobs:
             if [ -z "$title" ]; then
               title="Merge ${BRANCH} into main"
             fi
-            if ! gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body "Opened automatically from a push to \`${BRANCH}\`."; then
-              number="$(gh pr list --repo "$REPO" --base main --head "$head" --state open --json number --jq '.[0].number')"
-              if [ -z "$number" ]; then
-                exit 1
-              fi
-            else
-              number="$(gh pr list --repo "$REPO" --base main --head "$head" --state open --json number --jq '.[0].number')"
+            set +e
+            create_output="$(gh pr create --repo "$REPO" --base main --head "$BRANCH" --title "$title" --body "Opened automatically from a push to \`${BRANCH}\`." 2>&1)"
+            set -e
+            printf '%s\n' "$create_output"
+            number="$(printf '%s\n' "$create_output" | awk 'match($0, /\/pull\/[0-9]+/) { print substr($0, RSTART + 6, RLENGTH - 6); exit }')"
+            if [ -z "$number" ]; then
+              exit 1
             fi
           fi
 
